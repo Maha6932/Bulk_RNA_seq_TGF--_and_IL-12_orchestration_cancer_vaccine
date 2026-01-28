@@ -1,0 +1,1210 @@
+
+```{r}
+if(!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install(c("tximport", "DESeq2", "org.Mm.eg.db"))
+```
+
+```{r}
+
+library(tximport)
+library(DESeq2)
+library(readr)
+library(dplyr)
+library(org.Mm.eg.db)
+library(AnnotationDbi)
+library(ggplot2)
+library(pheatmap)
+library(ggrepel)
+```
+
+```{r}
+#==============================================================================
+# 1. IMPORT SALMON DATA
+#==============================================================================
+
+# Read samples
+samples <- read.csv("//wsl.localhost/Ubuntu/home/maha/rnaseq_trm/metadata/samples_file.csv", stringsAsFactors = FALSE)
+files <- file.path("//wsl.localhost/Ubuntu/home/maha/rnaseq_trm/salmon", samples$sample, "quant.sf")
+names(files) <- samples$sample
+all(file.exists(files))
+
+# Read one file to build tx2gene mapping
+test <- read.delim(files[1])
+head(test)
+
+# Create tx2gene from the pipe-delimited transcript info
+tx2gene <- data.frame(
+  TXNAME = as.character(test$Name),
+  GENEID = sapply(strsplit(as.character(test$Name), "\\|"), function(x) {
+    gene <- x[2]  # Second field is gene ID
+    sub("\\..*", "", gene)  # Remove version number (.1, .2, etc.)
+  }),
+  stringsAsFactors = FALSE
+)
+head(tx2gene, 20)
+dim(tx2gene)
+
+# Import salmon quantification data and summarize to gene level
+txi <- tximport(
+  files,
+  type = "salmon",
+  tx2gene = tx2gene,
+  dropInfReps = TRUE
+)
+
+# Check the tximport objects
+str(txi)
+names(txi)
+dim(txi$counts)
+dim(txi$abundance)
+dim(txi$length)
+head(txi$counts)
+head(txi$abundance)
+```
+
+```{r}
+#==============================================================================
+# 2. CREATE DESEQ2 OBJECT
+#==============================================================================
+
+# Make sure condition is a factor
+samples$condition <- factor(samples$condition)
+
+# Check samples match
+all(colnames(txi$counts) == samples$sample)
+
+# Create DESeq2 object
+dds <- DESeqDataSetFromTximport(
+  txi,
+  colData = samples,
+  design = ~ condition
+)
+
+# Add Gene symbols to dds object 
+# Get ensembl IDs from dds rownames
+ensembl_ids <- rownames(dds)
+
+# Map to gene symbols
+gene_symbols <- mapIds(
+  org.Mm.eg.db,
+  keys = ensembl_ids,
+  column = "SYMBOL",
+  keytype = "ENSEMBL",
+  multiVals = "first"
+)
+
+# Add as a new column in rowData
+mcols(dds)$symbol <- gene_symbols
+
+# For genes without symbols, use Ensembl ID
+mcols(dds)$symbol[is.na(mcols(dds)$symbol)] <- ensembl_ids[is.na(mcols(dds)$symbol)]
+head(mcols(dds))
+
+# Pre-filtering: remove genes with very low counts
+# Keeping genes with atleast 10 reads total across all samples
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+
+# Run DESeq2
+dds <- DESeq(dds)
+
+# Check how many genes remain
+nrow(dds)
+```
+
+```{r}
+#==============================================================================
+# 3. DIFFERENTIAL EXPRESSION ANALYSIS
+#==============================================================================
+
+# Moving forward with analysis, there are 3 major conditions as we know or 3 different cell types the CD103+, CD49+, CD103-49-
+# Here, CD103+ is stem like TRM cells, which is promoted by TGF-Beta, non-attacking but is involved in long term immunity
+# CD49+ is another TRM cells, which is nothing but differentiated CD103+ after vaccination, promoted by IL-2, which attacks the cancerous cells.
+# CD103-49- are non-resident TRM cells, which don't create an impact.
+# So, I am going to consider the CD103-49- as the reference and compare the other 2 to it. Also compare the CD49+ to CD103+ to understand what differential gene expression changes after vaccination
+
+head(samples$condition)
+
+# Get comparisons
+res_CD103_vs_DN <- results(dds, contrast = c("condition", "CD103+", "CD103-CD49-"))
+res_CD49_vs_DN <- results(dds, contrast = c("condition", "CD49+", "CD103-CD49-"))
+res_stemlike_vs_effector <- results(dds, contrast = c("condition", "CD103+", "CD49+"))
+
+# Summary of results
+summary(res_CD103_vs_DN)
+summary(res_CD49_vs_DN)
+summary(res_stemlike_vs_effector)
+
+# Based on the summary, we could see many genes are differential expressed between CD103_vs_DN and stemlike_vs_effector
+# Whereas the comparison between CD49_vs_DN have very few DEGs
+
+# Add gene symbols to results dataframes
+res_CD103_vs_DN_df <- as.data.frame(res_CD103_vs_DN)
+res_CD103_vs_DN_df$ensembl <- rownames(res_CD103_vs_DN_df)
+res_CD103_vs_DN_df$symbol <- mcols(dds)[rownames(res_CD103_vs_DN_df), "symbol"]
+
+res_CD49_vs_DN_df <- as.data.frame(res_CD49_vs_DN)
+res_CD49_vs_DN_df$ensembl <- rownames(res_CD49_vs_DN_df)
+res_CD49_vs_DN_df$symbol <- mcols(dds)[rownames(res_CD49_vs_DN_df), "symbol"]
+
+res_stemlike_vs_effector_df <- as.data.frame(res_stemlike_vs_effector)
+res_stemlike_vs_effector_df$ensembl <- rownames(res_stemlike_vs_effector_df)
+res_stemlike_vs_effector_df$symbol <- mcols(dds)[rownames(res_stemlike_vs_effector_df), "symbol"]
+
+# Save results with gene symbols
+write.csv(res_CD103_vs_DN_df[order(res_CD103_vs_DN_df$padj), ], 
+          "results/CD103_stemlike_vs_DoublenegativeNonTRM.csv", 
+          row.names = FALSE)
+
+write.csv(res_CD49_vs_DN_df[order(res_CD49_vs_DN_df$padj), ], 
+          "results/CD49_effector_vs_DoublenegativeNonTRM.csv", 
+          row.names = FALSE)
+
+write.csv(res_stemlike_vs_effector_df[order(res_stemlike_vs_effector_df$padj), ], 
+          "results/CD103_STEMLIKE_vs_CD49_EFFECTOR.csv", 
+          row.names = FALSE)
+```
+
+```{r}
+#==============================================================================
+# 4. VISUALIZATIONS
+#==============================================================================
+
+# Get variance stabilized data for plotting
+vsd <- vst(dds, blind = FALSE)
+
+#-------------------------------------
+# PCA
+#-------------------------------------
+pcaData <- plotPCA(vsd, intgroup = "condition", returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+ggplot(pcaData, aes(x = PC1, y = PC2, color = condition, label = name)) +
+  geom_point(size = 4) +
+  geom_text(vjust = -1, size = 3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  ggtitle("PCA: Clustering cells based on condition and checking if DN cluster with CD49+?") +
+  theme_minimal() +
+  scale_color_manual(values = c("CD103-CD49-" = "orange",
+                                "CD49+" = "blue",
+                                "CD103+" = "red"))
+ggsave("results/PCA_check_DN_clustering.pdf", width = 10, height = 8)
+
+# Yes, DN samples and CD49+ samples clusters together. 
+# whereas, CD103+ samples are variable, there is 44% variance between CD49+ and DN samples.
+
+#---------------------------------------------------
+# MA plot
+#---------------------------------------------------
+
+# MA plot shows us how gene expression changes between 2 conditions,
+# as a function of how highly expressed the gene is overall.
+# M = Minus (log fold change), A = Average (mean expression)
+# X = mean of normalized counts across all samples (left -> lowly expressed genes, right -> highly expressed genes)
+# How much RNA is there overall?
+# Y-axis: M (log2 fold change)
+# y = log2(expression in cond A/ cond B)
+# 0 - No change, +1 - 2*higher in cond A, -1 - 2*lower in cond A
+
+pdf("results/MA_plot_CD103_vs_DN.pdf", width = 8, height = 6)
+plotMA(res_CD103_vs_DN, ylim = c(-5, 5), 
+       main = "CD103+ stem-like vs CD103-CD49- (Double Negative)")
+abline(h = c(-1, 1), col = "red", lty = 2)
+dev.off()
+
+pdf("results/MA_plot_CD49_vs_DN.pdf", width = 8, height = 6)
+plotMA(res_CD49_vs_DN, ylim = c(-5, 5), 
+       main = "CD49+ effector-like vs CD103-CD49- (Double Negative)")
+abline(h = c(-1, 1), col = "red", lty = 2)
+dev.off()
+
+pdf("results/MA_plot_CD103+_vs_CD49+.pdf", width = 8, height = 6)
+plotMA(res_stemlike_vs_effector, ylim = c(-5, 5), 
+       main = "CD103+ stem-like vs CD49+ effector-like")
+abline(h = c(-1, 1), col = "red", lty = 2)
+dev.off()
+
+#-------------------------------------
+# Volcano Plot - CD103+ vs DN
+#-------------------------------------
+
+# Add significance categories
+res_CD103_vs_DN_df$diffexpressed <- "NO"
+res_CD103_vs_DN_df$diffexpressed[res_CD103_vs_DN_df$log2FoldChange > 1 & res_CD103_vs_DN_df$padj < 0.05] <- "UP in CD103+"
+res_CD103_vs_DN_df$diffexpressed[res_CD103_vs_DN_df$log2FoldChange < -1 & res_CD103_vs_DN_df$padj < 0.05] <- "DOWN in CD103+"
+
+# Clean data for plotting
+res_CD103_vs_DN_clean <- res_CD103_vs_DN_df %>%
+  filter(!is.na(padj)) %>%
+  filter(!is.na(symbol))
+
+# Select top genes to label
+label_df_CD103 <- res_CD103_vs_DN_clean %>%
+  filter(
+    diffexpressed != "NO",
+    abs(log2FoldChange) > 2,
+    padj < 0.01
+  ) %>%
+  arrange(padj) %>%
+  head(50)
+
+# Volcano plot
+ggplot(res_CD103_vs_DN_clean, aes(x = log2FoldChange, y = -log10(padj), color = diffexpressed)) +
+  geom_point(alpha = 0.4, size = 1.5) +
+  geom_text_repel(
+    data = label_df_CD103,
+    aes(label = symbol),
+    size = 3,
+    max.overlaps = 20
+  ) +
+  scale_color_manual(values = c("DOWN in CD103+" = "blue", "NO" = "grey", "UP in CD103+" = "red")) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  theme_minimal() +
+  labs(
+    title = "CD103+ stem-like vs CD103-CD49- (DN)",
+    x = "log2 Fold Change",
+    y = "-log10(adjusted p-value)",
+    color = "Differential Expression"
+  ) +
+  theme(text = element_text(size = 12))
+
+ggsave("results/Volcano_CD103_vs_DN.pdf", width = 10, height = 8)
+
+#-------------------------------------
+# Volcano Plot - CD103+ vs CD49+
+#-------------------------------------
+
+# Add significance categories
+res_stemlike_vs_effector_df$diffexpressed <- "NO"
+res_stemlike_vs_effector_df$diffexpressed[res_stemlike_vs_effector_df$log2FoldChange > 1 & res_stemlike_vs_effector_df$padj < 0.05] <- "UP in CD103+"
+res_stemlike_vs_effector_df$diffexpressed[res_stemlike_vs_effector_df$log2FoldChange < -1 & res_stemlike_vs_effector_df$padj < 0.05] <- "UP in CD49+"
+
+# Clean data for plotting
+res_stemlike_vs_effector_clean <- res_stemlike_vs_effector_df %>%
+  filter(!is.na(padj)) %>%
+  filter(!is.na(symbol))
+
+# Select top genes to label
+label_df_stem_eff <- res_stemlike_vs_effector_clean %>%
+  filter(
+    diffexpressed != "NO",
+    abs(log2FoldChange) > 2,
+    padj < 0.01
+  ) %>%
+  arrange(padj) %>%
+  head(50)
+
+# Volcano plot
+ggplot(res_stemlike_vs_effector_clean, aes(x = log2FoldChange, y = -log10(padj), color = diffexpressed)) +
+  geom_point(alpha = 0.4, size = 1.5) +
+  geom_text_repel(
+    data = label_df_stem_eff,
+    aes(label = symbol),
+    size = 3,
+    max.overlaps = 30
+  ) +
+  scale_color_manual(values = c("UP in CD49+" = "blue", "NO" = "grey", "UP in CD103+" = "red")) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  theme_minimal() +
+  labs(
+    title = "CD103+ stem-like vs CD49+ effector",
+    x = "log2 Fold Change",
+    y = "-log10(adjusted p-value)",
+    color = "Differential Expression"
+  ) +
+  theme(text = element_text(size = 12))
+
+ggsave("results/Volcano_CD103_vs_CD49.pdf", width = 10, height = 8)
+
+#--------------------------------------------------
+# Heatmap - Top 100 DE genes (CD103+ vs CD49+)
+#--------------------------------------------------
+# Get top 100 genes
+top100_genes <- rownames(res_stemlike_vs_effector[order(res_stemlike_vs_effector$padj)[1:100], ])
+samples_subset_CD103_CD49 <- samples$condition %in% c("CD103+", "CD49+")
+samples_subset_CD103CD49_CD49 <- samples$condition %in% c("CD103-CD49-", "CD49+")
+vsd_subset_CD103_CD49 <- vsd[, samples_subset_CD103_CD49]
+vsd_subset_CD10349_CD49 <- vsd[, samples_subset_CD103CD49_CD49]
+# Get expression matrix
+top100_matrix_CD103_CD49 <- assay(vsd_subset_CD103_CD49)[top100_genes, ]
+View(top100_matrix_CD103_CD49)
+
+View(top100_matrix_CD103_CD49)
+
+genes_full <- rownames(
+  res_stemlike_vs_effector[
+    order(res_stemlike_vs_effector$padj, na.last = NA),
+    ]
+)
+all_genes_matrix <- assay(vsd_subset_CD103_CD49)[genes_full, ]
+all_genes_comp_DN_eff <- assay(vsd_subset_CD10349_CD49)[genes_full, ]
+# Add gene symbols as rownames
+rownames(all_genes_matrix) <- mcols(dds)[genes_full, "symbol"]
+rownames(all_genes_comp_DN_eff) <- mcols(dds)[genes_full, "symbol"]
+View(all_genes_matrix)
+genes <- c( "Tcf7",      # TCF-1 protein
+  "Slamf6",    # SLAM family member 6
+  "Il7r",      # CD127/IL-7Rα protein
+  "Il2",       # IL-2
+  "Sell",      # CD62L/L-selectin
+  "Id3",       # Inhibitor of DNA binding 3
+  "Cxcr5"      # CXCR5
+)
+stem_like_markers <- all_genes_matrix[
+  intersect(genes, rownames(all_genes_matrix)),]
+View(stem_like_markers)
+
+genes_effector <- c(
+  "Pdcd1",     # PD-1 protein
+  "Havcr2",    # Tim-3 protein
+  "Tox",       # Tox protein
+  "Tbx21",     # T-bet protein
+  "Eomes",     # Eomesodermin
+  "Gzmb",      # Granzyme B
+  "Prf1",      # Perforin
+  "Ifng",      # IFN-gamma
+  "Tnf"        # TNF-alpha
+)
+effector_like_markers <- all_genes_matrix[
+  intersect(genes_effector, rownames(all_genes_matrix)),]
+View(effector_like_markers)
+effector_like_markers_comp <- all_genes_comp_DN_eff[
+  intersect(genes_effector, rownames(all_genes_comp_DN_eff)),]
+View(effector_like_markers_comp)
+annotation_col_CD103_CD49 <- data.frame(
+  Condition = colData(vsd_subset_CD10349_CD49)$condition,
+  row.names = colnames(vsd_subset_CD10349_CD49)
+)
+annotation_col_effector <- data.frame(
+  Condition = colData(vsd_subset_CD103_CD49)$condition,
+  row.names = colnames(vsd_subset_CD103_CD49)
+)
+
+pheatmap(effector_like_markers,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         annotation_col = annotation_col_effector,
+         scale = "row",
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         main = "Effector genes CD103+ vs CD49+)",
+         fontsize = 6,
+         fontsize_row = 8)
+
+pheatmap(effector_like_markers_comp,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         annotation_col = annotation_col_CD103_CD49,
+         scale = "row",
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         main = "Effector genes CD103-CD49- vs CD49+)",
+         fontsize = 6,
+         fontsize_row = 8)
+
+pheatmap(stem_like_markers,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         annotation_col = annotation_col_effector,
+         scale = "row",
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         main = "Effector genes CD103+ vs CD49+)",
+         fontsize = 6,
+         fontsize_row = 8)
+# Add gene symbols as rownames
+rownames(top100_matrix_CD103_CD49) <- mcols(dds)[top100_genes, "symbol"]
+
+# Create annotation for samples
+annotation_col_CD103_CD49 <- data.frame(
+  Condition = colData(vsd_subset_CD103_CD49)$condition,
+  row.names = colnames(vsd_subset_CD103_CD49)
+)
+
+# Plot heatmap with gene symbols
+pheatmap(top100_matrix_CD103_CD49,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         annotation_col = annotation_col_CD103_CD49,
+         scale = "row",
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         main = "Top 100 DE genes (CD103+ vs CD49+)",
+         fontsize = 6,
+         fontsize_row = 6)
+
+ggsave("results/Heatmap_top100_CD103_vs_CD49.pdf", width = 12, height = 14)
+
+#--------------------------------------------------
+# Heatmap - Top 50 DE genes (CD103+ vs DN)
+#--------------------------------------------------
+
+# Get top 50 genes
+top70_genes <- rownames(res_CD103_vs_DN[order(res_CD103_vs_DN$padj)[1:70], ])
+samples_subset_CD103_DN <- samples$condition %in% c("CD103+", "CD103-CD49-")
+vsd_subset_CD103_DN <- vsd[, samples_subset_CD103_DN]
+
+# Get expression matrix
+top70_matrix <- assay(vsd_subset_CD103_DN)[top70_genes, ]
+
+# Add gene symbols as rownames
+rownames(top70_matrix) <- mcols(dds)[top70_genes, "symbol"]
+
+# Create annotation for samples
+annotation_col_CD103_DN <- data.frame(
+  Condition = colData(vsd_subset_CD103_DN)$condition,
+  row.names = colnames(vsd_subset_CD103_DN)
+)
+
+# Plot heatmap with gene symbols
+pheatmap(top70_matrix,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         annotation_col = annotation_col_CD103_DN,
+         scale = "row",
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         main = "Top 70 DE genes (CD103+ vs CD103-CD49-)",
+         fontsize = 6,
+         fontsize_row = 8)
+
+
+ggsave("results/Heatmap_top50_CD103_vs_DN.pdf", width = 10, height = 12)
+```
+
+```{r}
+#==============================================================================
+# 5. SUMMARY STATISTICS
+#==============================================================================
+
+cat("\n=== SUMMARY STATISTICS ===\n")
+cat("Total genes tested:", nrow(res_CD103_vs_DN_df), "\n\n")
+
+cat("CD103+ vs DN:\n")
+cat("  Significant genes (padj < 0.05):", 
+    sum(res_CD103_vs_DN_df$padj < 0.05, na.rm = TRUE), "\n")
+cat("  Upregulated in CD103+ (padj < 0.05, log2FC > 1):", 
+    sum(res_CD103_vs_DN_df$padj < 0.05 & res_CD103_vs_DN_df$log2FoldChange > 1, na.rm = TRUE), "\n")
+cat("  Downregulated in CD103+ (padj < 0.05, log2FC < -1):", 
+    sum(res_CD103_vs_DN_df$padj < 0.05 & res_CD103_vs_DN_df$log2FoldChange < -1, na.rm = TRUE), "\n\n")
+
+cat("CD49+ vs DN:\n")
+cat("  Significant genes (padj < 0.05):", 
+    sum(res_CD49_vs_DN_df$padj < 0.05, na.rm = TRUE), "\n\n")
+
+cat("CD103+ vs CD49+ (stem vs effector):\n")
+cat("  Significant genes (padj < 0.05):", 
+    sum(res_stemlike_vs_effector_df$padj < 0.05, na.rm = TRUE), "\n")
+cat("  Upregulated in CD103+ (padj < 0.05, log2FC > 1):", 
+    sum(res_stemlike_vs_effector_df$padj < 0.05 & res_stemlike_vs_effector_df$log2FoldChange > 1, na.rm = TRUE), "\n")
+cat("  Upregulated in CD49+ (padj < 0.05, log2FC < -1):", 
+    sum(res_stemlike_vs_effector_df$padj < 0.05 & res_stemlike_vs_effector_df$log2FoldChange < -1, na.rm = TRUE), "\n")
+```
+
+```{r}
+#-------------------------------------------
+# Gene set enrichment analysis (GSEA)
+#-------------------------------------------
+# Install required packages
+if(!requireNamespace("clusterProfiler", quietly = TRUE))
+  BiocManager::install("clusterProfiler")
+if(!requireNamespace("enrichplot", quietly = TRUE))
+  BiocManager::install("enrichplot")
+if(!requireNamespace("msigdbr", quietly = TRUE))
+  install.packages("msigdbr")
+if(!requireNamespace("fgsea", quietly = TRUE))
+  BiocManager::install("fgsea")
+
+
+library(clusterProfiler)
+library(enrichplot)
+library(msigdbr)
+library(fgsea)
+
+# Prepare ranked gene list for GSEA
+# For GSEA, we need a ranked list of all genes (not just the significant ones)
+# Rank by: sign(log2FC) * -log10(pvalue) to prioritize both batch effect size and significance
+# To get the results for CD103+ vs CD49+
+head(res_stemlike_vs_effector_clean)
+res_gsea <- res_stemlike_vs_effector_clean
+
+
+# Create ranking metric: sign(log2FC) * -log10(pvalue)
+# This considers both batch effect size (log2FC) and significance (pvalue)
+res_gsea$rank_metric <- sign(res_gsea$log2FoldChange) * (-log10(res_gsea$pvalue))
+
+# Create a named vector of gene ranks (use ENSEMBL IDs)
+gene_list <- res_gsea$rank_metric
+names(gene_list) <- res_gsea$ensembl
+head(res_gsea[,c("symbol", "log2FoldChange", "pvalue", "rank_metric")], 20)
+
+# If a gene has a high log2FC (upregulated in CD103+) and low p-value (significant), it gets a high score
+# If a gene has low log2FC (downregulated in CD103+/ upregulated in CD49+) and low p-value it gets a high negative score
+# Genes with a high p-value (not significant gets scores near 0)
+
+# Sort from most positive (upregulated in CD103+) to most negative (upregulated in CD49+)
+gene_list <- sort(gene_list, decreasing = TRUE)
+
+# Check the ranking
+head(gene_list, 20)
+
+
+cat("\n Total genes in ranked list:", length(gene_list), "\n")
+cat("\n Top 10 genes (most upregulated in CD103+): \n")
+head(gene_list, 10)
+
+cat("\n Bottom 10 genes (most upregulated in CD49+): \n")
+tail(gene_list, 20)
+
+# Get the hallmark gene sets from MSigDB
+# Download hallmark gene sets for mouse
+available_collection <- msigdbr_collections()
+View(available_collection)
+msigdb_hallmark <- msigdbr(species = "Mus musculus", category = "H")
+hallmark_list <- split(msigdb_hallmark$ensembl_gene, msigdb_hallmark$gs_name)
+cat("Total rows:", nrow(msigdb_hallmark), "\n")
+cat("Number of pathways:", length(hallmark_list), "\n")
+
+# Show first few pathway names
+cat("\nFirst 5 pathway names:\n")
+print(head(names(hallmark_list), 5))
+
+# The size of first pathway
+cat("\nNumber of genes in first pathway (", names(hallmark_list)[1], "):\n")
+cat(length(hallmark_list[[1]]), "genes\n")
+
+# first few genes from first pathway
+cat("\nFirst 10 genes in this pathway:\n")
+print(head(hallmark_list[[1]], 10))
+
+# Summary of pathway sizes
+pathway_sizes <- sapply(hallmark_list, length)
+cat("\n=== Pathway size summary ===\n")
+cat("Min genes in a pathway:", min(pathway_sizes), "\n")
+cat("Max genes in a pathway:", max(pathway_sizes), "\n")
+cat("Mean genes per pathway:", round(mean(pathway_sizes), 1), "\n")
+cat("Median genes per pathway:", median(pathway_sizes), "\n")
+
+# GO Biological Process (needs subcategory)
+misgdb_go_bp <- msigdbr(
+  species = "Mus musculus",
+  category = "C5",
+  subcategory = "GO:BP"
+)
+nrow(misgdb_go_bp)
+go_bp_list <- split(misgdb_go_bp$ensembl_gene, misgdb_go_bp$gs_name)
+
+# KEGG Pathways (legacy version commonly used)
+msigdb_kegg <- msigdbr(
+  species = "Mus musculus",
+  category = "C2",
+  subcategory = "CP:KEGG_LEGACY"
+)
+
+nrow(msigdb_kegg)
+
+kegg_list <- split(msigdb_kegg$ensembl_gene, msigdb_kegg$gs_name)
+
+# Reactome Pathways
+msigdb_reactome <- msigdbr(
+  species = "Mus musculus",
+  category = "C2",
+  subcategory = "CP:REACTOME"
+)
+
+reactome_list <- split(msigdb_reactome$ensembl_gene, msigdb_reactome$gs_name)
+
+# Immunologic signatures
+msigdb_immune <- msigdbr(
+  species = "Mus musculus",
+  category = "C7",
+  subcategory = "IMMUNESIGDB"
+)
+
+cat("Total Immune signature rows:", nrow(msigdb_immune), "\n")
+cat("Number of Immune signatures:", length(unique(msigdb_immune$gs_name)), "\n")
+
+immune_list <- split(msigdb_immune$ensembl_gene, msigdb_immune$gs_name)
+
+# RUN GSEA ON ALL GENE SET COLLECTIONS
+# 1. Hallmark
+fgsea_hallmark <- fgsea(
+  pathways = hallmark_list,
+  stats = gene_list,
+  minSize = 15,
+  maxSize = 500,
+  nperm = 10000
+)
+
+fgsea_hallmark <- fgsea_hallmark[order(fgsea_hallmark$pval), ]
+cat("Significant Hallmark pathways (padj < 0.05):", 
+  sum(fgsea_hallmark$padj < 0.05, na.rm = TRUE), "\n")
+
+head(fgsea_hallmark, 10)
+
+# GO Biological Process
+cat("\n=== Running GSEA on GO:BP ===\n")
+fgsea_go_bp <- fgsea(
+  pathways = go_bp_list,
+  stats = gene_list,
+  minSize = 15,
+  maxSize = 500,
+  nperm = 10000
+)
+fgsea_go_bp <- fgsea_go_bp[order(fgsea_go_bp$pval), ]
+
+cat("Significant GO:BP pathways (padj < 0.05):", 
+    sum(fgsea_go_bp$padj < 0.05, na.rm = TRUE), "\n")
+
+head(fgsea_go_bp, 10)
+
+# KEGG
+cat("\n=== Running GSEA on KEGG ===\n")
+fgsea_kegg <- fgsea(
+  pathways = kegg_list,
+  stats = gene_list,
+  minSize = 15,
+  maxSize = 500,
+  nperm = 10000
+)
+fgsea_kegg <- fgsea_kegg[order(fgsea_kegg$pval), ]
+
+cat("Significant KEGG pathways (padj < 0.05):", 
+    sum(fgsea_kegg$padj < 0.05, na.rm = TRUE), "\n")
+
+head(fgsea_kegg, 10)
+
+# Immunologic signatures
+cat("\n=== Running GSEA on Immunologic Signatures ===\n")
+fgsea_immune <- fgsea(
+  pathways = immune_list,
+  stats = gene_list,
+  minSize = 15,
+  maxSize = 500,
+  nperm = 10000
+)
+fgsea_immune <- fgsea_immune[order(fgsea_immune$pval), ]
+
+cat("Significant Immune signatures (padj < 0.05):", 
+    sum(fgsea_immune$padj < 0.05, na.rm = TRUE), "\n")
+
+head(fgsea_immune, 20)
+
+#==============================================================================
+# GSEA Summary
+#==============================================================================
+
+cat("\n=== GSEA SUMMARY: CD103+ stem-like vs CD49+ effector ===\n\n")
+
+# Hallmark
+cat("HALLMARK PATHWAYS:\n")
+cat("  Significant (padj < 0.05):", sum(fgsea_hallmark$padj < 0.05), "\n")
+cat("  Enriched in CD103+:", sum(fgsea_hallmark$padj < 0.05 & fgsea_hallmark$NES > 0), "\n")
+cat("  Enriched in CD49+:", sum(fgsea_hallmark$padj < 0.05 & fgsea_hallmark$NES < 0), "\n\n")
+
+cat("Top 5 in CD103+ stem-like:\n")
+print(head(fgsea_hallmark[fgsea_hallmark$NES > 0, c("pathway", "NES", "padj")], 5))
+
+cat("\nTop 5 in CD49+ effector:\n")
+print(head(fgsea_hallmark[fgsea_hallmark$NES < 0, c("pathway", "NES", "padj")], 5))
+
+# GO BP
+cat("\n\nGO BIOLOGICAL PROCESS:\n")
+cat("  Significant (padj < 0.05):", sum(fgsea_go_bp$padj < 0.05), "\n")
+cat("  Enriched in CD103+:", sum(fgsea_go_bp$padj < 0.05 & fgsea_go_bp$NES > 0), "\n")
+cat("  Enriched in CD49+:", sum(fgsea_go_bp$padj < 0.05 & fgsea_go_bp$NES < 0), "\n\n")
+
+# KEGG
+cat("KEGG PATHWAYS:\n")
+cat("  Significant (padj < 0.05):", sum(fgsea_kegg$padj < 0.05), "\n")
+cat("  Enriched in CD103+:", sum(fgsea_kegg$padj < 0.05 & fgsea_kegg$NES > 0), "\n")
+cat("  Enriched in CD49+:", sum(fgsea_kegg$padj < 0.05 & fgsea_kegg$NES < 0), "\n\n")
+
+cat("Key KEGG pathways in CD103+:\n")
+print(head(fgsea_kegg[fgsea_kegg$NES > 0 & fgsea_kegg$padj < 0.05, 
+                      c("pathway", "NES", "padj")], 10))
+```
+
+```{r}
+#==============================================================================
+# VISUALIZATION 1: Hallmark Pathways Barplot
+#==============================================================================
+
+library(ggplot2)
+library(dplyr)
+
+# Get significant Hallmark pathways
+hallmark_sig <- fgsea_hallmark[fgsea_hallmark$padj < 0.05, ]
+
+# Clean pathway names (remove "HALLMARK_" prefix and replace underscores)
+hallmark_sig$pathway_clean <- gsub("HALLMARK_", "", hallmark_sig$pathway)
+hallmark_sig$pathway_clean <- gsub("_", " ", hallmark_sig$pathway_clean)
+
+# Add a column for which cell type is enriched
+hallmark_sig$enriched_in <- ifelse(hallmark_sig$NES > 0, "CD103+ stem-like", "CD49+ effector")
+
+# Create the plot
+p1 <- ggplot(hallmark_sig, aes(x = reorder(pathway_clean, NES), y = NES, fill = enriched_in)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_manual(
+    values = c("CD103+ stem-like" = "#E41A1C", "CD49+ effector" = "#377EB8"),
+    name = "Enriched in"
+  ) +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black", size = 0.5) +
+  labs(
+    title = "Hallmark Pathways: CD103+ vs CD49+",
+    subtitle = "Positive NES = CD103+ stem-like | Negative NES = CD49+ effector",
+    x = "",
+    y = "Normalized Enrichment Score (NES)"
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 10, color = "gray40"),
+    axis.text.y = element_text(size = 11),
+    legend.position = "bottom"
+  )
+
+print(p1)
+ggsave("results/GSEA_Hallmark_barplot.pdf", p1, width = 10, height = 8)
+ggsave("results/GSEA_Hallmark_barplot.png", p1, width = 10, height = 8, dpi = 300)
+
+#==============================================================================
+# VISUALIZATION 2: Top GO Biological Process
+#==============================================================================
+
+# Get significant GO pathways
+go_sig <- fgsea_go_bp[fgsea_go_bp$padj < 0.05, ]
+
+# Get top 15 from each direction
+go_top_cd103 <- head(go_sig[go_sig$NES > 0, ], 15)
+go_top_cd49 <- head(go_sig[go_sig$NES < 0, ], 15)
+go_top <- rbind(go_top_cd103, go_top_cd49)
+
+# Clean pathway names
+go_top$pathway_clean <- gsub("GOBP_", "", go_top$pathway)
+go_top$pathway_clean <- gsub("_", " ", go_top$pathway_clean)
+go_top$pathway_clean <- tolower(go_top$pathway_clean)
+
+# Add enrichment column
+go_top$enriched_in <- ifelse(go_top$NES > 0, "CD103+ stem-like", "CD49+ effector")
+
+# Create plot
+p2 <- ggplot(go_top, aes(x = reorder(pathway_clean, NES), y = NES, fill = enriched_in)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_manual(
+    values = c("CD103+ stem-like" = "#E41A1C", "CD49+ effector" = "#377EB8"),
+    name = "Enriched in"
+  ) +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black", size = 0.5) +
+  labs(
+    title = "Top 30 GO Biological Process Pathways",
+    subtitle = "Top 15 from CD103+ stem-like and CD49+ effector",
+    x = "",
+    y = "Normalized Enrichment Score (NES)"
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 10),
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 10, color = "gray40"),
+    axis.text.y = element_text(size = 9),
+    legend.position = "bottom"
+  )
+
+print(p2)
+ggsave("results/GSEA_GO_BP_top30_barplot.pdf", p2, width = 12, height = 10)
+ggsave("results/GSEA_GO_BP_top30_barplot.png", p2, width = 12, height = 10, dpi = 300)
+
+#==============================================================================
+# VISUALIZATION 3: KEGG Pathways
+#==============================================================================
+
+# Get significant KEGG pathways
+kegg_sig <- fgsea_kegg[fgsea_kegg$padj < 0.05, ]
+
+# Clean pathway names
+kegg_sig$pathway_clean <- gsub("KEGG_", "", kegg_sig$pathway)
+kegg_sig$pathway_clean <- gsub("_", " ", kegg_sig$pathway_clean)
+kegg_sig$pathway_clean <- tolower(kegg_sig$pathway_clean)
+
+# Add enrichment column
+kegg_sig$enriched_in <- ifelse(kegg_sig$NES > 0, "CD103+ stem-like", "CD49+ effector")
+
+# Create plot
+p3 <- ggplot(kegg_sig, aes(x = reorder(pathway_clean, NES), y = NES, fill = enriched_in)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_manual(
+    values = c("CD103+ stem-like" = "#E41A1C", "CD49+ effector" = "#377EB8"),
+    name = "Enriched in"
+  ) +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black", size = 0.5) +
+  labs(
+    title = "KEGG Pathways: CD103+ vs CD49+",
+    subtitle = "Significant pathways (FDR < 0.05)",
+    x = "",
+    y = "Normalized Enrichment Score (NES)"
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 11),
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 10, color = "gray40"),
+    axis.text.y = element_text(size = 10),
+    legend.position = "bottom"
+  )
+
+print(p3)
+ggsave("results/GSEA_KEGG_barplot.pdf", p3, width = 10, height = 8)
+ggsave("results/GSEA_KEGG_barplot.png", p3, width = 10, height = 8, dpi = 300)
+
+#==============================================================================
+# VISUALIZATION   4: Immune Pathways
+#==============================================================================
+
+head(fgsea_immune)
+
+# Get significant Immune pathways
+immune_sig <- fgsea_immune[fgsea_immune$padj < 0.05, ]
+
+# Clean pathway names
+immune_sig$pathway_clean <- gsub("GSE_", "", immune_sig$pathway)
+immune_sig$pathway_clean <- gsub("_", " ", immune_sig$pathway_clean)
+immune_sig$pathway_clean <- tolower(immune_sig$pathway_clean)
+
+head(immune_sig)
+
+# Add enrichment column
+immune_sig$enriched_in <- ifelse(immune_sig$NES > 0, "CD103+ stem-like", "CD49+ effector")
+
+immune_sig_top <- immune_sig[order(abs(immune_sig$NES), decreasing = TRUE), ][1:20, ]
+
+# Create plot
+p_immune <- ggplot(immune_sig_top, aes(x = reorder(pathway_clean, NES), y = NES, fill = enriched_in)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_manual(
+    values = c("CD103+ stem-like" = "#E41A1C", "CD49+ effector" = "#377EB8"),
+    name = "Enriched in"
+  ) +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black", linewidth = 0.5) +
+  labs(
+    title = "Immune Pathways: CD103+ vs CD49+",
+    subtitle = "Significant pathways (FDR < 0.05)",
+    x = "",
+    y = "Normalized Enrichment Score (NES)"
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 11),
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 10, color = "gray40"),
+    axis.text.y = element_text(size = 10),
+    legend.position = "bottom"
+  )
+
+print(p_immune)
+
+#==============================================================================
+# VISUALIZATION 4: Enrichment Plots for Key Pathways
+#==============================================================================
+
+library(fgsea)
+
+# Plot enrichment for top pathway in CD103+ (Interferon Gamma Response)
+p4 <- plotEnrichment(
+  hallmark_list[["HALLMARK_INTERFERON_GAMMA_RESPONSE"]], 
+  gene_list
+) +
+  labs(
+    title = "Hallmark: Interferon Gamma Response",
+    subtitle = "Enriched in CD103+ stem-like (NES = 1.92, FDR = 0.003)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "gray40")
+  )
+
+print(p4)
+ggsave("results/GSEA_enrichment_IFNg_response.pdf", p4, width = 8, height = 6)
+
+# Plot enrichment for top pathway in CD49+ (E2F Targets)
+p5 <- plotEnrichment(
+  hallmark_list[["HALLMARK_E2F_TARGETS"]], 
+  gene_list
+) +
+  labs(
+    title = "Hallmark: E2F Targets (Cell Cycle)",
+    subtitle = "Enriched in CD49+ effector (NES = -2.39, FDR = 0.005)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "gray40")
+  )
+
+print(p5)
+ggsave("results/GSEA_enrichment_E2F_targets.pdf", p5, width = 8, height = 6)
+
+# Plot enrichment for Cell Adhesion Molecules (top KEGG pathway)
+p6 <- plotEnrichment(
+  kegg_list[["KEGG_CELL_ADHESION_MOLECULES_CAMS"]], 
+  gene_list
+) +
+  labs(
+    title = "KEGG: Cell Adhesion Molecules",
+    subtitle = "Enriched in CD103+ stem-like (NES = 2.15, FDR = 0.004)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "gray40")
+  )
+
+print(p6)
+ggsave("results/GSEA_enrichment_cell_adhesion.pdf", p6, width = 8, height = 6)
+
+#==============================================================================
+# VISUALIZATION 5: Dot Plot (NES vs Significance)
+#==============================================================================
+
+# Combine all significant pathways
+hallmark_sig$category <- "Hallmark"
+kegg_sig$category <- "KEGG"
+
+# Select relevant columns
+hallmark_plot <- hallmark_sig[, c("pathway_clean", "NES", "padj", "category", "enriched_in")]
+kegg_plot <- kegg_sig[, c("pathway_clean", "NES", "padj", "category", "enriched_in")]
+
+combined_pathways <- rbind(hallmark_plot, kegg_plot)
+
+# Create dot plot
+p7 <- ggplot(combined_pathways, aes(x = NES, y = -log10(padj), 
+                                    color = enriched_in, shape = category,
+                                    label = pathway_clean)) +
+  geom_point(size = 4, alpha = 0.7) +
+  geom_text_repel(
+    size = 3,
+    max.overlaps = 30,  # Increase if you want to show more labels
+    box.padding = 0.5,
+    point.padding = 0.3,
+    segment.color = "grey50",
+    segment.size = 0.3
+  ) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray50") +
+  scale_color_manual(
+    values = c("CD103+ stem-like" = "#E41A1C", "CD49+ effector" = "#377EB8"),
+    name = "Enriched in"
+  ) +
+  scale_shape_manual(values = c("Hallmark" = 16, "KEGG" = 17), name = "Database") +
+  labs(
+    title = "Pathway Enrichment Overview",
+    subtitle = "Hallmark and KEGG pathways",
+    x = "Normalized Enrichment Score (NES)",
+    y = "-log10(adjusted p-value)"
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "right"
+  )
+
+print(p7)
+ggsave("results/GSEA_dotplot_overview.pdf", p7, width = 10, height = 7)
+ggsave("results/GSEA_dotplot_overview.png", p7, width = 10, height = 7, dpi = 300)
+```
+
+```{r}
+#==============================================================================
+# COMPLETE GSEA ANALYSIS - ALL THREE COMPARISONS
+#==============================================================================
+
+# Adding CD103- VS DN
+# Prepare gene lists for all comparisons
+res_for_gsea_cd103_dn <- res_CD103_vs_DN_df[
+  !is.na(res_CD103_vs_DN_df$pvalue) & 
+  !is.na(res_CD103_vs_DN_df$log2FoldChange), 
+]
+
+res_for_gsea_cd103_dn$rank_metric <- sign(res_for_gsea_cd103_dn$log2FoldChange) * 
+  (-log10(res_for_gsea_cd103_dn$pvalue))
+
+gene_list_cd103_dn <- res_for_gsea_cd103_dn$rank_metric
+names(gene_list_cd103_dn) <- res_for_gsea_cd103_dn$ensembl
+gene_list_cd103_dn <- sort(gene_list_cd103_dn, decreasing = TRUE)
+
+# Run GSEA
+fgsea_hallmark_cd103_dn <- fgsea(
+  pathways = hallmark_list,
+  stats = gene_list_cd103_dn,
+  minSize = 15,
+  maxSize = 500,
+  nperm = 10000
+)
+
+print(fgsea_hallmark_cd103_dn)
+
+```
+```{r}
+#==============================================================================
+# COMPARISON FIGURE: All Three Comparisons Side-by-Side
+#==============================================================================
+
+# First, run GSEA on CD49+ vs DN
+res_CD49_vs_DN_df <- as.data.frame(res_CD49_vs_DN)
+res_CD49_vs_DN_df$ensembl <- rownames(res_CD49_vs_DN_df)
+
+res_for_gsea_cd49_dn <- res_CD49_vs_DN_df[
+  !is.na(res_CD49_vs_DN_df$pvalue) & 
+  !is.na(res_CD49_vs_DN_df$log2FoldChange), 
+]
+
+res_for_gsea_cd49_dn$rank_metric <- sign(res_for_gsea_cd49_dn$log2FoldChange) * 
+  (-log10(res_for_gsea_cd49_dn$pvalue))
+
+gene_list_cd49_dn <- res_for_gsea_cd49_dn$rank_metric
+names(gene_list_cd49_dn) <- res_for_gsea_cd49_dn$ensembl
+gene_list_cd49_dn <- sort(gene_list_cd49_dn, decreasing = TRUE)
+
+# Run GSEA
+fgsea_hallmark_cd49_dn <- fgsea(
+  pathways = hallmark_list,
+  stats = gene_list_cd49_dn,
+  minSize = 15,
+  maxSize = 500,
+  nperm = 10000
+)
+
+fgsea_hallmark_cd49_dn <- fgsea_hallmark_cd49_dn[order(fgsea_hallmark_cd49_dn$pval), ]
+
+cat("CD49+ vs DN: Significant pathways:", 
+    sum(fgsea_hallmark_cd49_dn$padj < 0.05), "\n")
+
+# Now create comparison with all three
+cd103_vs_cd49_data <- fgsea_hallmark %>%
+  filter(pathway %in% top_pathways) %>%
+  select(pathway, NES) %>%
+  rename(CD103_vs_CD49 = NES)
+
+cd103_vs_dn_data <- fgsea_hallmark_cd103_dn %>%
+  filter(pathway %in% top_pathways) %>%
+  select(pathway, NES) %>%
+  rename(CD103_vs_DN = NES)
+
+cd49_vs_dn_data <- fgsea_hallmark_cd49_dn %>%
+  filter(pathway %in% top_pathways) %>%
+  select(pathway, NES) %>%
+  rename(CD49_vs_DN = NES)
+
+# Join all three
+comparison_data_full <- cd103_vs_cd49_data %>%
+  left_join(cd103_vs_dn_data, by = "pathway") %>%
+  left_join(cd49_vs_dn_data, by = "pathway")
+
+# Pivot
+comparison_long_full <- comparison_data_full %>%
+  pivot_longer(
+    cols = c(CD103_vs_CD49, CD103_vs_DN, CD49_vs_DN),
+    names_to = "comparison",
+    values_to = "NES"
+  )
+
+# Clean names
+comparison_long_full$pathway_clean <- gsub("HALLMARK_", "", comparison_long_full$pathway)
+comparison_long_full$pathway_clean <- gsub("_", " ", comparison_long_full$pathway_clean)
+
+comparison_long_full$comparison_clean <- case_when(
+  grepl("CD103_vs_CD49", comparison_long_full$comparison) ~ "CD103+ vs CD49+",
+  grepl("CD103_vs_DN", comparison_long_full$comparison) ~ "CD103+ vs DN",
+  grepl("CD49_vs_DN", comparison_long_full$comparison) ~ "CD49+ vs DN",
+  TRUE ~ comparison_long_full$comparison
+)
+
+# Plot with three comparisons
+p_comparison_full <- ggplot(comparison_long_full, 
+                            aes(x = reorder(pathway_clean, NES), 
+                                y = NES, 
+                                fill = comparison_clean)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.85), width = 0.8) +
+  coord_flip() +
+  scale_fill_manual(
+    values = c(
+      "CD103+ vs CD49+" = "#E41A1C", 
+      "CD103+ vs DN" = "#377EB8",
+      "CD49+ vs DN" = "#4DAF4A"  # Green for the third comparison
+    ),
+    name = "Comparison"
+  ) +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black", size = 0.5) +
+  labs(
+    title = "Top 10 Hallmark Pathways: All Pairwise Comparisons",
+    subtitle = "CD49+ vs DN shows minimal differences (confirming similarity)",
+    x = "",
+    y = "Normalized Enrichment Score (NES)"
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 11),
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 10, color = "gray40"),
+    legend.position = "bottom"
+  )
+
+print(p_comparison_full)
+ggsave("results/GSEA_comparison_all_three.pdf", p_comparison_full, width = 13, height = 9)
+View(comparison_data_full)
+```
+
+```{r}
+#==============================================================================
+# Correlation Plot
+#==============================================================================
+
+library(ggplot2)
+library(ggrepel)
+# Create scatter plot
+p_correlation <- ggplot(comparison_data_full, 
+                        aes(x = CD103_vs_CD49, 
+                            y = CD103_vs_DN,
+                            label = gsub("HALLMARK_", "", gsub("_", " ", pathway)))) +
+  geom_point(size = 4, alpha = 0.7, color = "red") +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray50") +
+  geom_text_repel(size = 3, max.overlaps = 15) +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black", alpha = 0.3) +
+  geom_vline(xintercept = 0, linetype = "solid", color = "black", alpha = 0.3) +
+  labs(
+    title = "CD49+ and DN Show Similar Enrichment Patterns",
+    subtitle = "Points near diagonal line indicate similar NES in both comparisons\n(high correlation confirms CD49+ ≈ DN transcriptionally)",
+    x = "NES: CD103+ vs CD49+",
+    y = "NES: CD103+ vs DN"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 10, color = "gray40")
+  )
+
+print(p_correlation)
+
+# Calculate correlation
+cor_value <- cor(comparison_data_full$CD103_vs_CD49, comparison_data_full$CD103_vs_DN)
+cat("\nCorrelation between CD103+ vs CD49+ and CD103+ vs DN:", round(cor_value, 3), "\n")
+cat("(High correlation confirms CD49+ and DN are transcriptionally similar)\n")
+```
+
