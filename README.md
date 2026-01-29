@@ -120,6 +120,7 @@ These markers define the cell populations analyzed in the RNA-seq data:
    - CD49a+ TILs
    - CD103⁻ CD49a⁻ TILs
 4. **Bulk RNA-seq:** Each sample represents gene expression of a specific TIL population
+   
 | Sample | Condition |
 |--------|-----------|
 | SRR33724457 | CD103-CD49- |
@@ -251,7 +252,7 @@ Our analysis of 12 RNA-seq samples across three TRM populations revealed distinc
 
 ### Principal Component Analysis
 
-![PCA Plot](PCA_check_DN_clustering.pdf)
+![PCA Plot](figures/PCA_check_DN_clustering.pdf)
 
 **Key Observations:**
 - **PC1 (44% variance):** Separates CD103+ from CD49+/DN populations
@@ -384,10 +385,10 @@ Our analysis of 12 RNA-seq samples across three TRM populations revealed distinc
 
 ### Key Marker Gene Expression
 As the CD103+ cells compared to CD49+ are differentially expressed compared to the other two populations, I focused on it and plotted a heatmap to see the expression of the genes across the samples from two different conditions.
-![Heatmap of the genes differentially expressed between CD103+ cells and CD49+ cells samples](heatmap_top_100_genes_CD103_CD49.pdf)
+![Heatmap of the genes differentially expressed between CD103+ cells and CD49+ cells samples](figures/heatmap_top_100_genes_CD103_CD49.pdf)
 
 Additionally, I also plotted the heatmap of the two cell population CD103+ vs CD103-49- as they are also different from each other, for this I focused on the top 70 genes differentailly expressed
-![Heatmap of the genes differentially expressed between CD103+ cells and CD103-CD49- cells samples](Heatmap_top70_CD103_vs_DN.pdf)
+![Heatmap of the genes differentially expressed between CD103+ cells and CD103-CD49- cells samples](figures/Heatmap_top70_CD103_vs_DN.pdf)
 
 
 **Stemness Markers (↑ in CD103+):**
@@ -411,7 +412,7 @@ Additionally, I also plotted the heatmap of the two cell population CD103+ vs CD
 - Cd69 (activation/residency marker)
 
 ### Comparison Across All Three Populations
-![PCA plot](PCA_check_DN_clustering.pdf)
+![PCA plot](figures/PCA_check_DN_clustering.pdf)
 
 Principal component analysis of normalized gene expression profiles demonstrated clear segregation of samples by cell type. PC1 (44% variance) separated CD103+ stem-like TRM from both CD49+ effector and CD103-CD49- (DN) populations. CD49+ and DN samples clustered together with minimal inter-group separation, revealing transcriptional similarity between these two populations. In contrast, CD103+ samples formed a distinct cluster, indicating a unique gene expression signature. This PCA pattern supports a two-state model of TRM differentiation, where CD103+ cells represent a stem-like state and both CD49+ and DN cells represent related effector-like states.
 
@@ -421,7 +422,7 @@ Principal component analysis of normalized gene expression profiles demonstrated
 - **Main Finding:** CD49+ and DN samples cluster together, indicating transcriptional similarity
 - **Biological Interpretation:** The major axis is CD103+ stem-like ↔ CD49+/DN effector-like, not three distinct populations
 
-![Comparison Barplot](GSEA_comparison_all_three.pdf)
+![Comparison Barplot](figures/GSEA_comparison_all_three.pdf)
 
 Comparison of Hallmark pathway enrichment across all pairwise contrasts revealed that CD49⁺ and DN populations exhibit minimal transcriptional differences, as indicated by near-zero NES values in the CD49⁺ vs DN comparison. In contrast, CD103⁺ cells displayed strong enrichment of immune signaling pathways, including interferon responses and TNFα–NFκB signaling, alongside reduced enrichment of cell-cycle–associated programs relative to both CD49⁺ and DN cells. These results suggest that CD49⁺ and DN cells represent transcriptionally similar effector-like states, whereas CD103⁺ cells constitute a distinct stem-like or resident population.
 
@@ -433,14 +434,14 @@ Comparison of Hallmark pathway enrichment across all pairwise contrasts revealed
 
 - This scatter plot compares GSEA normalized enrichment scores (NES) for Hallmark pathways between CD103⁺ vs CD49⁺ (x-axis) and CD103⁺ vs DN (y-axis) populations.
   
-![GSEA Correlation Between CD103⁺ vs CD49⁺ and CD103⁺ vs DN Comparisons](p_correlation.pdf)
+![GSEA Correlation Between CD103⁺ vs CD49⁺ and CD103⁺ vs DN Comparisons](figures/p_correlation.pdf)
 
 - Pathways clustering along the diagonal (y = x) show similar enrichment in both comparisons, indicating that CD49⁺ and DN cells share highly similar transcriptional programs relative to CD103⁺ cells. Immune and inflammatory pathways—such as interferon-α/γ response, TNFα–NFκB signaling, inflammatory response, and allograft rejection—are positively enriched in both contrasts, while cell-cycle–related pathways (E2F targets, G2M checkpoint, mTORC1 signaling) are similarly depleted.
 
 - Overall, the strong diagonal alignment and high concordance of NES values support the conclusion that CD49⁺ and DN populations are transcriptionally similar, particularly in immune activation versus proliferative programs.
 - How do CD49a+ and CD103−CD49a− T cells differ functionally? Is it mainly due to differences in adhesion and circulation genes, with CD103−CD49a− representing non-resident circulating tumor cells and CD49a+ being tumor-resident?
 
-![Adhesion vs Egress heatmap between the celltypes DN vs CD49](adhesion_vs_egress_heatmap_CD103_CD49.pdf)
+![Adhesion vs Egress heatmap between the celltypes DN vs CD49](figures/adhesion_vs_egress_heatmap_CD103_CD49.pdf)
 
 Although CD49a+ and CD103−CD49a− T cells share overall transcriptional profiles, heatmap analysis of adhesion and trafficking genes reveals key functional differences in their migratory behavior. CD103−CD49a− cells retain a circulating-like program, expressing high levels of egress-promoting genes (CCR7, S1PR1, SELL/CD62L, and KLF2), which facilitate lymph node homing and tissue exit. In contrast, CD49a+ cells show reduced expression of these circulation markers while preferentially expressing tissue-retention genes including CD69, CXCR6, RUNX3, and the integrin ITGAE (CD103), consistent with a tumor-resident memory (TRM) identity.
 Notably, CD49a+ cells also show higher expression of ITGB1 (integrin β1, which pairs with CD49a/integrin α1 to form VLA-1/α1β1), reinforcing their adhesive capacity to extracellular matrix components in the tumor microenvironment. The reciprocal expression patterns—high CCR7/S1PR1/KLF2 in double-negative cells versus high CD69/CXCR6/RUNX3 in CD49a+ cells—suggest these populations represent distinct positions along a residency-circulation spectrum, with CD103−CD49a− cells maintaining the capacity for tissue egress and recirculation, while CD49a+ cells are committed to long-term tumor residence.
